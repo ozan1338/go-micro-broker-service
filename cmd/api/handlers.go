@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -32,6 +33,12 @@ type LogPayload struct{
 	Data string `json:"data"`
 }
 
+type RabbitMQPayload struct{
+	Action string `json:"action"`
+	Log LogPayload `json:"log,omitempty"`
+	Mail MailPayload `json:"mail,omitempty"`
+}
+
 func (app *Config) Broker(w http.ResponseWriter, r *http.Request) {
 	payload := JsonResponse{
 		Error: false,
@@ -57,7 +64,8 @@ func (app *Config) HandleSubmission(w http.ResponseWriter, r *http.Request) {
 		// app.logItem(w, requestPayload.Log)
 		app.logEventViaRabbit(w, requestPayload.Log)
 	case "mail":
-		app.sendMail(w, requestPayload.Mail)
+		// app.sendMail(w, requestPayload.Mail)
+		app.mailViaRabbit(w, requestPayload.Mail)
 	default:
 		app.errorJson(w, errors.New("unknown action"))
 	}
@@ -188,6 +196,21 @@ func (app *Config) sendMail(w http.ResponseWriter, msg MailPayload) {
 	app.writeJSON(w, http.StatusAccepted, payload)
 }
 
+func (app *Config) mailViaRabbit(w http.ResponseWriter, m MailPayload) {
+	err := app.pushMailToQueue(m)
+
+	if err != nil {
+		app.errorJson(w, err)
+		return
+	}
+
+	var payload JsonResponse
+	payload.Error = false
+	payload.Message = "Message send to " + m.To +" via RabbitMQ"
+	fmt.Println(payload)
+	app.writeJSON(w, http.StatusAccepted, payload)
+}
+
 func (app *Config) logEventViaRabbit(w http.ResponseWriter, l LogPayload) {
 	err := app.pushToQueue(l.Name,l.Data)
 
@@ -204,15 +227,38 @@ func (app *Config) logEventViaRabbit(w http.ResponseWriter, l LogPayload) {
 	// return
 }
 
+func (app *Config) pushMailToQueue(m MailPayload) error {
+	emitter, err := events.NewEvenEmitter(app.Rabbit)
+	if err != nil {
+		return err
+	}
+
+	mailPayload := RabbitMQPayload{
+		Action: "mail",
+		Mail: m,
+	}
+
+	j, _ := json.MarshalIndent(&mailPayload, "", "\t")
+	err = emitter.Push(string(j), "log.INFO")
+	if err != nil {
+		return err
+	}
+
+	return err
+}
+
 func (app *Config) pushToQueue(name string, message string) error {
 	emitter, err := events.NewEvenEmitter(app.Rabbit)
 	if err != nil {
 		return err
 	}
 
-	payload := LogPayload{
-		Name: name,
-		Data: message,
+	payload := RabbitMQPayload{
+		Action: "log",
+		Log: LogPayload{
+			Name: name,
+			Data: message,
+		},
 	}
 
 	j, _ := json.MarshalIndent(&payload, "", "\t")
